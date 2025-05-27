@@ -92,6 +92,10 @@ void print_help(void)
 					   "  Note: after mkfs or blkdiscard, you need a full digest sync\n"
 					   "\n"
 
+					   "-E, --era-sectors=N\n"
+					   "  Era block size in sectors (default: 4096)\n"
+					   "\n"
+
 					   "-b, --block-size=N[KMG]\n"
 					   "  Block size in N bytes for writing and checksum calculations\n"
 					   "  (default:4K)\n"
@@ -322,6 +326,7 @@ void parse_options(int argc, char **argv)
 		{"digest", required_argument, 0, 'f'},
 		{"delta", required_argument, 0, 'D'},
 		{"era", required_argument, 0, 'e'},
+		{"era-sectors", required_argument, 0, 'E'},
 		{"buffer-size", required_argument, 0, 1001},
         {"read-jobs", required_argument, 0, 1002},
         {"read-depth", required_argument, 0, 1003},
@@ -377,6 +382,9 @@ void parse_options(int argc, char **argv)
 			break;
 		case 'e':
 			param.era = optarg;
+			break;
+		case 'E':
+			param.era_sectors = atoi(optarg);
 			break;
 		case 1001:
 			param.max_buf_size = parse_units(optarg);
