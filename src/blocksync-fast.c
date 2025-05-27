@@ -978,8 +978,11 @@ void init_params(void)
 	if (flag.oper_mode == MAKEDELTA && delta.path == NULL || flag.oper_mode == MAKEDIGEST && digest.path == NULL)
 		flag.prst = stderr;
 
-	if (flag.silent)
-		freopen("/dev/null", "w", flag.prst);
+	if (flag.silent && (NULL == freopen("/dev/null", "w", flag.prst)))
+	{
+		fprintf(stderr, "No /dev/null!?\n");
+		cleanup(EXIT_FAILURE);
+	}
 
     if (flag.oper_mode == BLOCKSYNC && flag.dont_write && flag.mmap) {
         fprintf(flag.prst, "Dry run uses buffered comparison to avoid writable mappings or resizing\n");
