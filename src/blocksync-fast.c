@@ -19,6 +19,8 @@
 #include "globals.h"
 #include "init.h"
 #include "queued.h"
+#include "benchmark.h"
+#include "digest_info.h"
 
 void print_version(void)
 {
@@ -1033,17 +1035,14 @@ int main(int argc, char **argv)
 	switch (flag.oper_mode)
 	{
 	case BENCHMARK:
-		#include "benchmark.h"
 		benchmark_hashes();
 		break;
 
 	case DIGESTINFO:
-		#include "digest_info.h"
 		digest_info();
 		break;
 
 	case DELTAINFO:
-		#include "digest_info.h"
 		delta_info();
 		break;
 
