@@ -782,7 +782,7 @@ void init_params(void)
 		flag.prst = stderr;
 
 	if (flag.silent)
-		freopen("/dev/null", "w", flag.prst) != NULL;
+		freopen("/dev/null", "w", flag.prst);
 
     if (flag.oper_mode == BLOCKSYNC && flag.dont_write && flag.mmap) {
         fprintf(flag.prst, "Dry run uses buffered comparison to avoid writable mappings or resizing\n");
@@ -986,7 +986,7 @@ void init_params(void)
 
 		if (param.block_size < src.stat.st_blksize)
 			fprintf(flag.prst, "Warning: given block size is smaller than the block size of the source device, which is %zu bytes\n",
-					src.stat.st_blksize);
+					(size_t)src.stat.st_blksize);
 	}
 
 	if (flag.oper_mode == BLOCKSYNC || flag.oper_mode == APPLYDELTA)
