@@ -50,3 +50,15 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Generated build files
+/Makefile
+/src/Makefile
+/config.h
+/config.log
+/config.status
+/stamp-h1
+/autom4te.cache/
+/src/.deps/
+/src/blocksync-fast
+*~
