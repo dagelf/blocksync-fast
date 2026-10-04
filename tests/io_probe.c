@@ -22,6 +22,16 @@ static int matches(int fd, const char *name) {
     const char *value = getenv(name);
     return value && !strcmp(path, value);
 }
+ssize_t write(int fd, const void *buf, size_t n) {
+    static ssize_t (*real)(int,const void *,size_t);
+    if (!real) real = dlsym(RTLD_NEXT, "write");
+    if (fd == STDOUT_FILENO && getenv("BSF_SHORT_STREAM")) {
+        static int interrupted;
+        if (!interrupted++) { errno = EINTR; return -1; }
+        if (n > 17) n = 17;
+    }
+    return real(fd, buf, n);
+}
 ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
     static ssize_t (*real)(int,const void *,size_t,off_t);
     if (!real) real = dlsym(RTLD_NEXT, "pwrite");
@@ -48,7 +58,15 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     static _Thread_local int interrupted_read;
     if (getenv("BSF_EINTR") && !interrupted_read++) { errno = EINTR; return -1; }
     if (getenv("BSF_SHORT_READ") && n > 19) n = 19;
-    return real(fd, buf, n, off);
+    ssize_t result = real(fd, buf, n, off);
+    if (result > 0 && matches(fd, "BSF_SOURCE")) {
+        const char *log = getenv("BSF_READ_LOG");
+        if (log) {
+            int out = open(log, O_WRONLY | O_APPEND | O_CREAT, 0600);
+            if (out >= 0) { char line[80]; int len = snprintf(line, sizeof(line), "%lld %zd\n", (long long)off, result); write(out, line, len); close(out); }
+        }
+    }
+    return result;
 }
 long syscall(long number, ...) {
     static long (*real)(long,...);

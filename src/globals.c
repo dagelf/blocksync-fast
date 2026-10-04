@@ -17,6 +17,7 @@
 */
 
 #include "globals.h"
+#include "era.h"
 
 int PAGE_SIZE = 4096;
 struct dev src = {.fd = -1}, dst = {.fd = -1}, digest = {.fd = -1}, delta = {.fd = -1};
@@ -194,6 +195,18 @@ ssize_t write_at_all(int fd, const void *buf, size_t size, off_t offset)
     size_t done = 0;
     while (done < size) {
         ssize_t n = pwrite(fd, (const char *)buf + done, size - done, offset + done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (!n) errno = EIO; return -1; }
+        done += n;
+    }
+    return done;
+}
+
+ssize_t write_stream_all(int fd, const void *buf, size_t size)
+{
+    size_t done = 0;
+    while (done < size) {
+        ssize_t n = write(fd, (const char *)buf + done, size - done);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { if (!n) errno = EIO; return -1; }
         done += n;
@@ -486,7 +499,7 @@ void makedelta_wri_flush_buf()
 
 		if (IS_MODE(delta.open_mode, PIPE_W))
 		{
-			if (write(delta.fd, (const void *)oper.delta_buf, oper.delta_wri_buf_size) < 0)
+			if (write_stream_all(delta.fd, (const void *)oper.delta_buf, oper.delta_wri_buf_size) < 0)
 			{
 				fprintf(stderr, "%s: error while writing to stdout: %s\n", process_name, strerror(errno));
 				cleanup(EXIT_FAILURE);
@@ -537,6 +550,7 @@ void oper_delta_buf_free()
 
 void cleanup(int result)
 {
+    era_free();
 	freedev(&src);
 	freedev(&dst);
 	freedev(&digest);

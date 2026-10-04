@@ -48,6 +48,7 @@ to have permission to write repository contents.
 ```console
  blocksync-fast [options]
  blocksync-fast -s <src_device> -d <dst_device> [-f <digest_file>] [options]
+ blocksync-fast -s <src_device> [-f <digest_file>] --make-digest [options]
  blocksync-fast -s <src_device> [-f <digest_file>] --make-delta -D <delta_file> [options]
  blocksync-fast -d <dst_device> --apply-delta -D <delta_file> [options]
 ```
@@ -184,6 +185,8 @@ all contribute to elapsed sync time. See [fixture validation and measurements](t
 |                         --benchmark-algos | Benchmark all supported hash algorithms                                                                     |
 |                             --digest-info | Checks digest file, prints info and exit                                                                    |
 |                              --delta-info | Checks delta file, prints info and exit                                                                     |
+|                           -e, --era=PATH | DM-era XML change list for make-digest/make-delta; requires a compatible baseline digest                    |
+|                        -E, --era-sectors=N | Era tracking block size in 512-byte sectors (default:4096)                                                   |
 |                           --read-jobs=N | Queued source reader threads (opt-in)                                                                       |
 |                          --read-depth=N | Maximum outstanding reads per reader (default:16)                                                          |
 |                     --read-size=N[KMG] | Bytes per queued source read (default:256K); independent of 4K hash blocks                                  |
@@ -369,51 +372,83 @@ $ blocksync-fast -d vol-2024-05-06-00.img --apply-delta -D vol-2024-05-06-00.del
 $ blocksync-fast -d vol-2024-05-06-00.img --apply-delta -D vol-2024-05-07-00.delta
 ```
 
-## DM-Era Support
+## DM-era support
 
-You can optimize image backups with blocksync-fast when using the device manager "era" feature. With this, you add an extra "era" mapping between a file system and the underlying storage. If you access the "era" mapping instead of the original storage, all write operations are recorded in an extra storage named "era metadata". For details, refer to the Linux kernel document on the topic: https://docs.kernel.org/admin-guide/device-mapper/era.html
+Linux [device-mapper era](https://docs.kernel.org/admin-guide/device-mapper/era.html)
+tracks writes to a mapped device. `era_invalidate` from
+[thin-provisioning-tools](https://github.com/jthornber/thin-provisioning-tools)
+exports the changed block indices as XML. Sven-Ola Tuecke's `--era` support lets
+`--make-digest` and `--make-delta` skip source ranges absent from that list.
+Block-sync, apply-delta and queued reads do not accept `--era`.
 
-You can query which blocks of the "era" mapping where written to since a specified era in the past. If you feed the resulting XML file into blocksync-fast, there will be a substancial operation speed up because only parts of the source device needs to be re-read and checksummed. The "--era file.xml" option is active for "--make-digest" and "--make-delta". Here is an commented example (provided that you have an LVM2 volume group "vg0" with free space as well as root access):
+Use `-e PATH` or `--era=PATH` for the XML file, or `--era=-` for XML on stdin.
+`-E N` or `--era-sectors=N` specifies the mapping's tracking block size in
+512-byte sectors (default: 4096 sectors, or 2 MiB). This must match the actual
+mapping; the XML does not contain its block size. The hash block size remains
+independent. Selected era ranges expand to all intersecting hash blocks.
 
-    # Create an empty LV with 1 PE (==4M) size. 4M should be enough for era metadata btree.
-    lvcreate --extents 1 --name era vg0
-    blkdiscard /dev/mapper/vg0-era
-    # Create an LV with 32 PE (==128M) size. This is our image to be backed up.
-    lvcreate --extents 32 --name test vg0
-    # Create device manager mappings
-    dmsetup create test-meta --table "0 8192 linear /dev/mapper/vg0-era 0"
-    dmsetup create test-era --table "0 262144 era /dev/mapper/test-meta /dev/mapper/vg0-test 4096"
-    dmsetup create test-access --table "0 8192 linear /dev/mapper/test-meta 0"
-    # Create a file system (Note: calls blkdiscard ioctl)
-    mkfs.ext4 /dev/mapper/test-era
-    # Take a metadata snapshot, advances era 1 to era 2
-    dmsetup message test-era 0 take_metadata_snap
-    # Query changes during "mkfs"
-    era_invalidate --written-since 1 /dev/mapper/test-access
-    <blocks>
-      <block block="0"/>
-      <range begin="3" end = "5"/>
-      <block block="12"/>
-      <block block="20"/>
-      <range begin="24" end = "27"/>
-      <block block="28"/>
-      <block block="36"/>
-      <block block="63"/>
-    </blocks>
+A complete, compatible, named baseline digest is required, including for empty
+change lists. Generate a full baseline first; missing, truncated, resized or
+incompatible baselines are rejected before rewriting the digest, even with
+`--force`. The XML must describe every change since that baseline for the same
+source device. Writes bypassing the era mapping and discard/TRIM changes are
+not reliably covered: omit `--era` and perform a full scan after such changes.
+A stopped workload or stable snapshot is still needed for a consistent backup.
 
-The example above uses era blocks with 4096 sectors (2M) to differentiate from PE size which is 8192 sectors (4M). If you feed the resulting XML into blocksync-fast, the first 2M of /dev/mapper/test-era are checksummed, then 4M skipped, then 4M checksummed, then 14M skipped, and so on...
+The accepted XML schema is `<blocks>` containing self-closing
+`<block block="N"/>` and `<range begin="N" end="N"/>` elements; range ends are
+exclusive. Whitespace, comments, an optional XML declaration, either quote style,
+and either attribute order are accepted. Unsorted/overlapping ranges are merged.
+Malformed XML, missing closing tags, negative/overflowing indices, unknown
+attributes and ranges outside source capacity are rejected before output changes.
+Input is limited to 16 MiB; entities and DTDs are unsupported.
 
-If you followed the above example, you may want to
+For an existing era mapping named `test-era` using metadata device `test-meta`,
+a full baseline backup can be created while the workload is stopped:
 
-    dmsetup remove test-access
-    dmsetup remove test-era
-    dmsetup remove test-meta
-    lvremove vg0/test
-    lvremove vg0/era
+```sh
+# Record the current era from dmsetup status alongside this baseline.
+dmsetup message test-era 0 checkpoint
+dmsetup status test-era
+blocksync-fast -s /dev/mapper/test-era -d backup.img -f baseline.digest
+```
+
+Before a later incremental backup, stop the workload again. Set `BASELINE_ERA`
+to the recorded era number, then export the held metadata snapshot and generate
+the delta (this example assumes the mapping uses 4096-sector tracking blocks):
+
+```sh
+dmsetup message test-era 0 take_metadata_snap
+era_invalidate --metadata-snapshot --written-since "$BASELINE_ERA" \
+  /dev/mapper/test-meta > changes.xml
+dmsetup message test-era 0 drop_metadata_snap
+cp baseline.digest baseline.digest.previous
+blocksync-fast --make-delta -s /dev/mapper/test-era -f baseline.digest \
+  --era=changes.xml --era-sectors=4096 -D next.delta
+blocksync-fast --apply-delta -d backup.img -D next.delta
+```
+
+Delta generation updates the digest before delta application. Keep the previous
+digest and era number until the delta has been safely stored and applied; if
+application fails, restore the previous digest before regenerating a delta.
+Do not advance the recorded era past writes not represented in the completed
+backup. Check the current era via `dmsetup status`; a checkpoint does not
+necessarily increment it.
+
+Digest updates persist `<digest>.incomplete` before mutation and remove it after
+output synchronization. Failed or interrupted era updates require recovery with
+a full baseline; selective retries refuse the incomplete marker. Preserve the
+previous baseline, or rebuild the backup and digest in full. To restore the
+previous baseline, first move the damaged digest and its marker out of the way
+together, then restore the saved digest and use its original era number.
+Keep any incomplete
+marker with its digest. `--dont-write` supports non-mutating era digest checks;
+era delta generation rejects write-suppression options. `--no-compare` is also
+rejected because skipping unlisted ranges requires trusting the baseline.
 
 ## Limitations and Notes
 
-Blocksync-fast is a tool for fast synchronization of block devices, designed to improve block-based backups. To use it as an automatic backup tool, it is recommended to include it in a BASH script, which will allow you to set up a solution adjusted to your individual needs, using various features and tools available in Linux. It should be taken into account the possibility of synchronization interruption due to network disconnection, device detachment, or other errors that may occur. In case of synchronization failure, the program will return an error code greater than 0, which should be handled in the BASH shell and appropriate actions, such as generating reports or retrying the synchronization, should be taken. It is also important to note that when synchronization with the Digest file is interrupted, there may be an inconsistencies between the state of the Digest file and the target storage device. Therefore, after each such interruption, it is recommended to rebuild the Digest file from the target backup or operate on a copy of the Digest file until full synchronization is achieved.
+Blocksync-fast is a tool for fast synchronization of block devices, designed to improve block-based backups. To use it as an automatic backup tool, it is recommended to include it in a BASH script, which will allow you to set up a solution adjusted to your individual needs, using various features and tools available in Linux. It should be taken into account the possibility of synchronization interruption due to network disconnection, device detachment, or other errors that may occur. In case of synchronization failure, the program will return an error code greater than 0, which should be handled in the BASH shell and appropriate actions, such as generating reports or retrying the synchronization, should be taken. Interrupted block-sync runs retain an incomplete marker and recover automatically by comparing destination bytes on the next run. Interrupted DM-era digest/delta updates require a complete baseline rebuild or restoration of the previous baseline; see the DM-era section above.
 
 An example backup script with GFS rotation scheme can be found in [scripts directory](https://www.github.com/nethappen/blocksync-fast/tree/main/scripts).
 

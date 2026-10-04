@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [Unreleased]
 
 ### Added
+- DM-era change-list filtering for digest and delta generation, with strict XML
+  validation, compatible-baseline checks, and interrupted-update detection.
 - Opt-in queued Linux native AIO source reads with configurable reader count,
   queue depth and read size, plus optional direct source reads.
 - Durable incomplete-sync markers and automatic recovery by destination comparison.
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Workflow artifacts are retained for five days, and upload failures are nonfatal.
 
 ### Fixed
+- `PAGE_SIZE` macro collisions, compiler warnings and digest-generation help usage.
+- Complete streamed delta writes after short writes or interrupted system calls.
 - Short I/O handling, final changed-run flush offsets, unexpected destination EOF,
   malformed digest validation, and non-mutating block-sync dry runs.
 - Link detection for `libm`, build status badge, binary artifact naming, and

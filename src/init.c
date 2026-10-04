@@ -19,6 +19,7 @@
 
 #include "globals.h"
 #include "queued.h"
+#include "era.h"
 #include <linux/fs.h>
 #include <linux/falloc.h>
 #include <sys/file.h>
@@ -137,6 +138,7 @@ void init_src_device(void)
 
     param.num_blocks = (src.data_size / param.block_size) + (src.data_size % param.block_size > 0 ? 1 : 0);
     param.data_size = src.data_size;
+    era_check_source();
 }
 
 int assume_yes, preallocate;
@@ -476,6 +478,7 @@ void init_digest_file()
         fprintf(stderr, "%s: queued reads require a 4K digest block size\n", process_name);
         cleanup(EXIT_FAILURE);
     }
+    era_require_digest();
     digest.data_size = HEADER_SIZE + (param.num_blocks * param.algo.size);
     dev_truncate(&digest);
 
@@ -597,7 +600,7 @@ void init_dst_delta(void)
 
     if (IS_MODE(delta.open_mode, PIPE_W) && !isatty(STDOUT_FILENO))
     {
-        if (write(delta.fd, (const void *)&delta_header, (size_t)sizeof(delta_header)) < 0)
+        if (write_stream_all(delta.fd, (const void *)&delta_header, (size_t)sizeof(delta_header)) < 0)
         {
             fprintf(stderr, "%s: error while writing to stdout: %s\n", process_name, strerror(errno));
             cleanup(EXIT_FAILURE);

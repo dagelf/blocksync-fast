@@ -19,6 +19,7 @@
 #include "globals.h"
 #include "init.h"
 #include "queued.h"
+#include "era.h"
 #include "benchmark.h"
 #include "digest_info.h"
 
@@ -89,6 +90,7 @@ void print_help(void)
 
 					   "-e, --era=PATH\n"
 					   "  Era XML file path. If set, will only process denoted blocks\n"
+					   "  Requires make-digest/make-delta and a complete baseline digest\n"
 					   "  Note: Era XML does not reflect BLKDISCARD changes (trim, mkfs)\n"
 					   "\n"
 
@@ -161,7 +163,7 @@ void print_help(void)
 					   "\n"
 
 					   "--dont-write-target\n"
-					   "  Perform run with no updates only to target device\n"
+					   "  Suppress target updates; block-sync also suppresses digest updates\n"
 					   "\n"
 
 					   "--dont-write-digest\n"
@@ -176,6 +178,7 @@ void print_help(void)
                        "\n"
                        "--force\n"
 					   "  Allows to overwrite files and override parameters which was generated before\n"
+					   "  Does not approve target shrinking or enlarge smaller block devices\n"
 					   "\n"
 
 					   "--silent\n"
@@ -302,7 +305,7 @@ void print_summary(void)
 
 void parse_options(int argc, char **argv)
 {
-	static const char *short_options = "hVys:d:S:f:D:b:a:l";
+	static const char *short_options = "hVys:d:S:f:D:b:a:le:E:";
 	static struct option long_options[] = {
 		{"help", no_argument, 0, 'h'},
 		{"version", no_argument, 0, 'V'},
@@ -384,7 +387,7 @@ void parse_options(int argc, char **argv)
 			param.era = optarg;
 			break;
 		case 'E':
-			param.era_sectors = atoi(optarg);
+			era_set_sectors(optarg);
 			break;
 		case 1001:
 			param.max_buf_size = parse_units(optarg);
@@ -529,6 +532,23 @@ void blocksync(void)
 	digest_wri_flush(digest_flush);
 }
 
+/* Flush pending digest bytes before changing their absolute positions. */
+static int skip_era_gap(size_t *digest_flush)
+{
+    off_t next = era_next_offset(src.abs_off);
+    if (next == src.abs_off) return 0;
+    digest_wri_flush(*digest_flush);
+    *digest_flush = 0;
+    size_t skipped = next - src.abs_off;
+    src.abs_off = next;
+    src.rel_off += skipped;
+    size_t hash_skipped = (skipped / param.block_size) * param.algo.size;
+    digest.abs_off += hash_skipped;
+    digest.rel_off += hash_skipped;
+    oper.num_block = next / param.block_size;
+    return 1;
+}
+
 void make_delta(void)
 {
 	size_t digest_flush = 0;
@@ -538,6 +558,7 @@ void make_delta(void)
 
 	while (src.abs_off < src.data_size)
 	{
+        if (skip_era_gap(&digest_flush)) continue;
 		if ((src.abs_off + src.block_size) > src.data_size)
 		{
 			src.block_size = src.data_size % src.block_size;
@@ -635,184 +656,6 @@ void make_delta(void)
 
 	delta.data_size = delta.abs_off;
 	dev_truncate(&delta);
-}
-
-void make_delta_era(void)
-{
-	size_t digest_flush = 0;
-	bool dev_reload = false;
-	bool digest_reload = false;
-	bool delta_reload = false;
-
-	FILE *era_fp = stdin;
-	char era_xml[128];
-	char c;
-
-	if (0 != strcmp("-", param.era))
-	{
-		era_fp = fopen(param.era, "r");
-		if (NULL == era_fp)
-		{
-			fprintf(stderr, "%s: %s\n", param.era, strerror(errno));
-			exit(EXIT_FAILURE);
-		}
-	}
-
-	if (NULL == fgets(era_xml, sizeof(era_xml), era_fp))
-	{
-		fprintf(stderr, "%s is is empty\n", param.era);
-		exit(EXIT_FAILURE);
-	}
-
-	if (0 >= sscanf(era_xml, "<blocks>%c", &c) || c != '\n')
-	{
-		era_xml[strcspn(era_xml, "\r\n")] = 0;
-		fprintf(stderr, "%s - 1st line: '<blocks>' expected, have: %s\n", param.era, era_xml);
-		exit(EXIT_FAILURE);
-	}
-
-	while (fgets(era_xml, sizeof(era_xml), era_fp) != NULL)
-	{
-		unsigned long long begin;
-		unsigned long long end;
-
-		if (2 == sscanf(era_xml, " <range begin = \" %lld \" end = \" %lld \" />", &begin, &end))
-		{
-			if (begin >= end)
-			{
-				era_xml[strcspn(era_xml, "\r\n")] = 0;
-				fprintf(stderr, "%s - wrong line: %s\n", param.era, era_xml);
-				exit(EXIT_FAILURE);
-			}
-		}
-		else if (1 == sscanf(era_xml, " <block block = \" %lld \" />", &begin))
-		{
-			end = begin + 1;
-		}
-		else if (0 >= sscanf(era_xml, "</blocks>%c", &c) || c != '\n')
-		{
-			era_xml[strcspn(era_xml, "\r\n")] = 0;
-			fprintf(stderr, "%s - last line: '</blocks>' expected, have: %s\n", param.era, era_xml);
-			exit(EXIT_FAILURE);
-		}
-		else
-		{
-			break;
-		}
-
-		while (src.abs_off < src.data_size && src.abs_off < (off_t)end * 512 * param.era_sectors)
-		{
-			if ((src.abs_off + src.block_size) > src.data_size)
-			{
-				src.block_size = src.data_size % src.block_size;
-				delta.block_size = sizeof(u_int64_t) + src.block_size;
-			}
-
-			dev_reload = false;
-			if (src.abs_off >= (off_t)begin * 512 * param.era_sectors)
-			{
-				dev_reload = check_buffer_reload(&src);
-			}
-			digest_reload = check_buffer_reload(&digest);
-			delta_reload = false;
-			if (src.abs_off >= (off_t)begin * 512 * param.era_sectors)
-			{
-				delta_reload = check_buffer_reload(&delta);
-			}
-
-			if (digest_flush > 0 || digest_reload)
-				digest_wri_flush(digest_flush);
-
-			if (delta_reload)
-			{
-				delta.data_size = delta.abs_off + delta.max_buf_size;
-				dev_truncate(&delta);
-				makedelta_wri_flush_buf();
-				map_buffer(&delta);
-			}
-
-			if (digest_reload || delta_reload)
-			{
-				sync_data(&digest);
-				sync_data(&delta);
-			}
-
-			if (dev_reload)
-				map_buffer(&src);
-
-			if (IS_MODE(digest.open_mode, WRITE) && digest_reload)
-				map_buffer(&digest);
-
-			get_ptr(&src);
-			get_ptr(&digest);
-
-			digest_flush = digest.block_size;
-			if (src.abs_off >= (off_t)begin * 512 * param.era_sectors)
-			{
-				prog.c_dst_wri = true;
-				prog.c_dst_mat = false;
-				prog.c_dig_mat = false;
-				if (IS_MODE(digest.open_mode, WRITE))
-					prog.c_dig_wri = true;
-				else
-					prog.c_dig_wri = false;
-
-				digest_flush = 0;
-
-				if (param.hash_use)
-					hash_buffer(param.algo.value, param.algo.library, param.algo.size, (void *)(oper.hash_buf + (digest.rel_off - digest.mov_off)), src.ptr_r, src.block_size);
-
-				if (IS_MODE(digest.open_mode, READ))
-				{
-					if (memcmp(digest.ptr_r, (const void *)(oper.hash_buf + (digest.rel_off - digest.mov_off)), param.algo.size) == 0)
-					{
-						prog.c_dst_wri = false;
-						prog.c_dig_wri = false;
-						prog.c_dig_mat = true;
-					}
-				}
-
-				if (prog.c_dst_wri)
-				{
-					prog.wri_blocks++;
-					prog.wri_bytes += src.block_size;
-					oper.dev_wri_buf_size += src.block_size;
-
-					memcpy((void *)(oper.delta_buf + oper.delta_wri_buf_size), (uint64_t *)&src.abs_off, sizeof(uint64_t));
-					memcpy((void *)(oper.delta_buf + oper.delta_wri_buf_size + sizeof(uint64_t)), (const void *)src.ptr_r, src.block_size);
-					oper.delta_wri_buf_size += delta.block_size;
-
-					delta.abs_off += delta.block_size;
-					delta.rel_off += delta.block_size;
-				}
-
-				if (prog.c_dig_wri)
-					oper.digest_wri_buf_size += digest.block_size;
-				else
-					digest_flush = digest.block_size;
-			}
-
-			if (flag.progress > 1)
-				print_detail_progress();
-			else if (flag.progress == 1)
-				print_progress();
-
-			digest.abs_off += digest.block_size;
-			digest.rel_off += digest.block_size;
-
-			src.abs_off += src.block_size;
-			src.rel_off += src.block_size;
-
-			oper.num_block++;
-		}
-	}
-
-	digest_wri_flush(0);
-	makedelta_wri_flush_buf();
-
-	delta.data_size = delta.abs_off;
-	dev_truncate(&delta);
-	fclose(era_fp);
 }
 
 void apply_delta(void)
@@ -916,6 +759,7 @@ void make_digest(void)
 
 	while (src.abs_off < src.data_size)
 	{
+        if (skip_era_gap(&digest_flush)) continue;
 		if ((src.abs_off + src.block_size) > src.data_size)
 			src.block_size = src.data_size % src.block_size;
 
@@ -980,152 +824,14 @@ void make_digest(void)
 	digest_wri_flush(digest_flush);
 }
 
-void make_digest_era(void)
-{
-	size_t digest_flush = 0;
-	bool dev_reload = false;
-	bool digest_reload = false;
-
-	FILE *era_fp = stdin;
-	char era_xml[128];
-	char c;
-
-	if (0 != strcmp("-", param.era))
-	{
-		era_fp = fopen(param.era, "r");
-		if (NULL == era_fp)
-		{
-			fprintf(stderr, "%s: %s\n", param.era, strerror(errno));
-			exit(EXIT_FAILURE);
-		}
-	}
-
-	if (NULL == fgets(era_xml, sizeof(era_xml), era_fp))
-	{
-		fprintf(stderr, "%s is is empty\n", param.era);
-		exit(EXIT_FAILURE);
-	}
-
-	if (0 >= sscanf(era_xml, "<blocks>%c", &c) || c != '\n')
-	{
-		era_xml[strcspn(era_xml, "\r\n")] = 0;
-		fprintf(stderr, "%s - 1st line: '<blocks>' expected, have: %s\n", param.era, era_xml);
-		exit(EXIT_FAILURE);
-	}
-
-	while (fgets(era_xml, sizeof(era_xml), era_fp) != NULL)
-	{
-		unsigned long long begin;
-		unsigned long long end;
-
-		if (2 == sscanf(era_xml, " <range begin = \" %lld \" end = \" %lld \" />", &begin, &end))
-		{
-			if (begin >= end)
-			{
-				era_xml[strcspn(era_xml, "\r\n")] = 0;
-				fprintf(stderr, "%s - wrong line: %s\n", param.era, era_xml);
-				exit(EXIT_FAILURE);
-			}
-		}
-		else if (1 == sscanf(era_xml, " <block block = \" %lld \" />", &begin))
-		{
-			end = begin + 1;
-		}
-		else if (0 >= sscanf(era_xml, "</blocks>%c", &c) || c != '\n')
-		{
-			era_xml[strcspn(era_xml, "\r\n")] = 0;
-			fprintf(stderr, "%s - last line: '</blocks>' expected, have: %s\n", param.era, era_xml);
-			exit(EXIT_FAILURE);
-		}
-		else
-		{
-			break;
-		}
-
-		while (src.abs_off < src.data_size && src.abs_off < (off_t)end * 512 * param.era_sectors)
-		{
-			if ((src.abs_off + src.block_size) > src.data_size)
-				src.block_size = src.data_size % src.block_size;
-
-			dev_reload = false;
-			if (src.abs_off >= (off_t)begin * 512 * param.era_sectors)
-			{
-				dev_reload = check_buffer_reload(&src);
-			}
-			digest_reload = check_buffer_reload(&digest);
-
-			if (digest_flush > 0 || digest_reload)
-				digest_wri_flush(digest_flush);
-
-			if (digest_reload)
-				sync_data(&digest);
-
-			if (dev_reload)
-				map_buffer(&src);
-
-			if (digest_reload)
-				map_buffer(&digest);
-
-			get_ptr(&src);
-			get_ptr(&digest);
-
-			digest_flush = digest.block_size;
-			if (src.abs_off >= (off_t)begin * 512 * param.era_sectors)
-			{
-				prog.c_dig_mat = false;
-				prog.c_dig_wri = true;
-
-				digest_flush = 0;
-
-				if (param.hash_use)
-					hash_buffer(param.algo.value, param.algo.library, param.algo.size, (void *)(oper.hash_buf + (digest.rel_off - digest.mov_off)), src.ptr_r, src.block_size);
-
-				if (IS_MODE(digest.open_mode, READ))
-				{
-					if (memcmp(digest.ptr_r, (const void *)(oper.hash_buf + (digest.rel_off - digest.mov_off)), param.algo.size) == 0)
-					{
-						prog.c_dig_wri = false;
-						prog.c_dig_mat = true;
-					}
-				}
-
-				if (prog.c_dig_wri)
-				{
-					oper.digest_wri_buf_size += digest.block_size;
-					prog.wri_blocks++;
-					prog.wri_bytes += digest.block_size;
-				}
-				else
-					digest_flush = digest.block_size;
-			}
-
-			if (flag.progress > 1)
-				print_detail_progress();
-			else if (flag.progress == 1)
-				print_progress();
-
-			digest.abs_off += digest.block_size;
-			digest.rel_off += digest.block_size;
-
-			src.abs_off += src.block_size;
-			src.rel_off += src.block_size;
-
-			oper.num_block++;
-		}
-	}
-
-	digest_wri_flush(0);
-	fclose(era_fp);
-}
-
 void init_params(void)
 {
-	if (flag.oper_mode == MAKEDELTA && delta.path == NULL || flag.oper_mode == MAKEDIGEST && digest.path == NULL)
+	if ((flag.oper_mode == MAKEDELTA && delta.path == NULL) || (flag.oper_mode == MAKEDIGEST && digest.path == NULL))
 		flag.prst = stderr;
 
 	if (flag.silent && (NULL == freopen("/dev/null", "w", flag.prst)))
 	{
-		fprintf(stderr, "No /dev/null!?\n");
+		fprintf(stderr, "Cannot redirect output to /dev/null\n");
 		cleanup(EXIT_FAILURE);
 	}
 
@@ -1284,7 +990,7 @@ void init_params(void)
 		dst.buf_size = (dst.data_size < dst.max_buf_size ? dst.data_size : dst.max_buf_size);
 	}
 
-	bool buf_adj_delta = false;
+	/* Delta buffers are already sized as complete records. */
 
 	if (flag.oper_mode == MAKEDELTA)
 	{
@@ -1321,7 +1027,7 @@ void init_params(void)
 		{
 			digest.block_size = param.algo.size;
 			digest.max_buf_size = (src.max_buf_size / src.block_size) * digest.block_size;
-			bool buf_adj_digest = adjust_buffer(&digest.max_buf_size, digest.block_size);
+			adjust_buffer(&digest.max_buf_size, digest.block_size);
 
 			if (IS_MODE(digest.open_mode, DIRECT) || IS_MODE(digest.open_mode, PIPE))
 				digest.buf_data = realloc(digest.buf_data, digest.max_buf_size);
@@ -1351,14 +1057,14 @@ void init_params(void)
 				param.algo.symbol, param.algo.size);
 
 		if (param.algo.size > param.block_size)
-			fprintf(flag.prst, "Warning: block size '%ld' is smaller than hash '%s' size\n", param.block_size, param.algo.symbol);
+			fprintf(flag.prst, "Warning: block size '%zu' is smaller than hash '%s' size\n", param.block_size, param.algo.symbol);
 	}
 
-	if (param.data_size > (size_t)(1UL * 1024 * 1024 * 1024 * 1024)) {
+	if (param.data_size > (uint64_t)(1ULL * 1024 * 1024 * 1024 * 1024)) {
 		param.pro_prec = 2;
 		param.pro_fact = 100;
 	}
-	else if (param.data_size > (size_t)(100UL * 1024 * 1024 * 1024)) {
+	else if (param.data_size > (uint64_t)(100ULL * 1024 * 1024 * 1024)) {
 		param.pro_prec = 1;
 		param.pro_fact = 10;
 	}
@@ -1374,6 +1080,7 @@ int main(int argc, char **argv)
 	process_name = basename(argv[0]);
 	parse_options(argc, argv);
     validate_read_options();
+    era_load();
 
 	switch (flag.oper_mode)
 	{
@@ -1406,10 +1113,8 @@ int main(int argc, char **argv)
 
 	case MAKEDELTA:
 		init_params();
-		if (NULL != param.era)
-			make_delta_era();
-		else
-			make_delta();
+		make_delta();
+        era_finish();
 		print_summary();
 		break;
 
@@ -1421,10 +1126,8 @@ int main(int argc, char **argv)
 
 	case MAKEDIGEST:
 		init_params();
-		if (NULL != param.era)
-			make_digest_era();
-		else
-			make_digest();
+		make_digest();
+        era_finish();
 		print_summary();
 		break;
 	}

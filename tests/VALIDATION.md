@@ -1,5 +1,24 @@
 # Queued read validation
 
+## DM-era integration validation
+
+Run `python3 tests/era.py` after building the binary and `io-probe.so` as below.
+The fixtures compare selectively updated digest bodies with independent full
+digests, parse/replay delta records independently, and also apply deltas through
+the CLI before checking source/target bytes. They cover buffered/mmap paths,
+gaps, unsorted/overlapping ranges, partial source tails, differing era/hash block
+sizes, empty lists, stdin XML, malformed/overflowing/out-of-bounds XML,
+incompatible/missing baselines, output aliases, dry-run digest checks and failure
+markers. Read instrumentation verifies that an empty list reads no source bytes
+and a selected tail skips the source prefix. Streamed delta tests inject short
+writes and EINTR into stdout. Actual device-mapper mappings and discard tracking
+were not exercised; the change list must be complete and match the baseline.
+
+The existing 579-invocation correctness matrix and failure, live-recovery and
+target-resizing suites were rerun after integration. A compile with
+`-DPAGE_SIZE=4096` verifies Dan Nelson's portability fix. The formatting memory
+leak fix retains our existing thread-local buffers.
+
 Baseline snapshot: `4b554d7`, committed before implementation as
 `dagelf <coenraad@wish.org.za>`. The snapshot includes the pre-existing generated
 build files and executable. Neither 400 GiB VM image was used or modified.
