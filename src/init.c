@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  ./src/init.c - this file is a part of program blocksync-fast
 
@@ -18,6 +19,9 @@
 
 #include "globals.h"
 #include "queued.h"
+#include <linux/fs.h>
+#include <linux/falloc.h>
+#include <sys/file.h>
 
 void init_map_methods(void)
 {
@@ -135,6 +139,65 @@ void init_src_device(void)
     param.data_size = src.data_size;
 }
 
+int assume_yes, preallocate;
+static struct stat shrink_approved;
+static int shrink_confirmed;
+
+/* Ask before creating a marker or mutating destination/digest metadata. */
+void confirm_target_shrink(void)
+{
+    struct stat st;
+    if (stat(dst.path, &st) || !S_ISREG(st.st_mode) || (uint64_t)st.st_size <= src.data_size)
+        return;
+    fprintf(stderr, "%s: warning: source is smaller; target '%s' would shrink from %s to %s\n",
+            process_name, dst.path, format_units(st.st_size, true), format_units(src.data_size, true));
+    if (BIT_SET(flag.dont_write, 1)) return;
+    if (!assume_yes) {
+        char answer[32];
+        if (!strcmp(src.path, "-")) {
+            fprintf(stderr, "%s: shrinking with stdin as source requires -y\n", process_name);
+            cleanup(EXIT_FAILURE);
+        }
+        fprintf(stderr, "Shrink target and discard trailing bytes? [y/N] ");
+        fflush(stderr);
+        if (!fgets(answer, sizeof(answer), stdin)) answer[0] = 0;
+        answer[strcspn(answer, "\r\n")] = 0;
+        if (strcasecmp(answer, "y") && strcasecmp(answer, "yes")) {
+            fprintf(stderr, "%s: target shrink declined; no target or digest changes\n", process_name);
+            cleanup(EXIT_FAILURE);
+        }
+    }
+    shrink_approved = st;
+    shrink_confirmed = 1;
+}
+
+static void resize_sync_target(size_t old_size)
+{
+    if (src.data_size > old_size) {
+        fprintf(stderr, "%s: warning: source is larger; growing target '%s' from %s to %s\n",
+                process_name, dst.path, format_units(old_size, true), format_units(src.data_size, true));
+        if (preallocate && !BIT_SET(flag.dont_write, 1)) {
+            /* Reserve before changing EOF. Never use an emulated zero-write
+             * fallback: unsupported allocation must fail before copying. */
+            int result;
+            do { result = fallocate(dst.fd, FALLOC_FL_KEEP_SIZE, old_size, src.data_size-old_size); }
+            while (result < 0 && errno == EINTR);
+            if (result < 0) {
+                fprintf(stderr, "%s: cannot preallocate added target space (no data copied): %s\n", process_name, strerror(errno));
+                cleanup(EXIT_FAILURE);
+            }
+        }
+    } else if (src.data_size < old_size && !BIT_SET(flag.dont_write, 1) && !assume_yes &&
+               (!shrink_confirmed || shrink_approved.st_dev != dst.stat.st_dev ||
+                shrink_approved.st_ino != dst.stat.st_ino || (size_t)shrink_approved.st_size != old_size)) {
+        fprintf(stderr, "%s: target changed since shrink confirmation; retry or use -y\n", process_name);
+        cleanup(EXIT_FAILURE);
+    }
+    destination_resized = 1;
+    dst.data_size = src.data_size;
+    dev_truncate(&dst);
+}
+
 void init_dst_device(void)
 {
     if (access(dst.path, F_OK) == 0)
@@ -164,19 +227,24 @@ void init_dst_device(void)
         cleanup(EXIT_FAILURE);
     }
 
+    if (flag.oper_mode == BLOCKSYNC && flock(dst.fd, LOCK_EX | LOCK_NB)) {
+        fprintf(stderr, "%s: destination is locked by another sync: %s\n", process_name, strerror(errno));
+        cleanup(EXIT_FAILURE);
+    }
+
     if (!IS_MODE(dst.open_mode, READ))
     {
         destination_resized = 1;
         fprintf(flag.prst, "Creating target device: '%s'\n",
                 dst.path);
 
-        if (flag.oper_mode == BLOCKSYNC)
-            dst.data_size = src.data_size;
-
-        else if (flag.oper_mode == APPLYDELTA)
-            dst.data_size = delta_header.data_size;
-
-        dev_truncate(&dst);
+        if (flag.oper_mode == BLOCKSYNC && S_ISREG(dst.stat.st_mode))
+            resize_sync_target(dst.stat.st_size);
+        else {
+            if (flag.oper_mode == BLOCKSYNC) dst.data_size = src.data_size;
+            else if (flag.oper_mode == APPLYDELTA) dst.data_size = delta_header.data_size;
+            dev_truncate(&dst);
+        }
     }
     else
     {
@@ -186,23 +254,20 @@ void init_dst_device(void)
         fprintf(flag.prst, "Target device: '%s' has size of %s\n",
                 dst.path, format_units(dst.data_size, true));
 
-        if (flag.oper_mode == BLOCKSYNC && dst.data_size != src.data_size)
-        {
-            destination_resized = 1;
-            fprintf(stderr, "%s: Block devices size mismatch.\n", process_name);
-
-            if (flag.force == 0)
-            {
-                fprintf(flag.prst, "Try add '--force' argument \n");
-                cleanup(EXIT_FAILURE);
+        if (flag.oper_mode == BLOCKSYNC && dst.data_size != src.data_size) {
+            if (S_ISREG(dst.stat.st_mode)) resize_sync_target(dst.data_size);
+            else {
+                if (dst.data_size < src.data_size) {
+                    fprintf(stderr, "%s: destination device capacity is smaller than source; --force cannot enlarge it\n", process_name);
+                    cleanup(EXIT_FAILURE);
+                }
+                if (!flag.force) {
+                    fprintf(stderr, "%s: destination device is larger; use --force to sync only the source-sized prefix\n", process_name);
+                    cleanup(EXIT_FAILURE);
+                }
+                destination_resized = 1;
+                dst.data_size = src.data_size;
             }
-
-            fprintf(flag.prst, "Target device: '%s' has overwrited size of %s\n",
-                    dst.path, format_units(src.data_size, true));
-            // dst.open_mode &= ~READ; // allow different size without overwrite
-
-            dst.data_size = src.data_size;
-            dev_truncate(&dst);
         }
 
         if (flag.oper_mode == APPLYDELTA && dst.data_size != delta_header.data_size)
@@ -322,13 +387,7 @@ void init_digest_file()
     {
         if (digest_header.data_size != src.data_size)
         {
-            fprintf(stderr, "%s: size of block device and digest saved size mismatch.\n", process_name);
-            if (flag.force == 0)
-            {
-                fprintf(flag.prst, "Try add '--force' argument to match new size\n");
-                cleanup(EXIT_FAILURE);
-            }
-            fprintf(flag.prst, "Applying new device size\n");
+            fprintf(flag.prst, "Digest covers a different source size; comparing destination bytes and rebuilding entries\n");
         }
 
         if (digest_header.block_size != param.block_size)

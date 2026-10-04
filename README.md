@@ -98,6 +98,32 @@ Sparse handling is unchanged: ordinary reads return zeros for holes, which enter
 comparisons and digest generation and overwrite stale destination data. This
 change does not skip host extents or parse NTFS metadata.
 
+Regular-file targets grow automatically when the source is larger; `--force` is
+not needed for resizing. A warning reports the old and new sizes. By default,
+the target is extended without reserving disk space in advance. Specify
+`--preallocate` to reserve the added range before copying: native Linux `fallocate(FALLOC_FL_KEEP_SIZE)` reserves the added range,
+then the target is extended. With this flag, new files reserve their entire size. Allocation,
+quota, size-limit or unsupported-preallocation errors fail early; there is no
+zero-writing fallback. Reservation includes zero/hole ranges, and covers the
+added range rather than extra space needed for overwriting existing CoW extents
+or filesystem metadata. Preallocation failure leaves existing target bytes,
+size and digest contents unchanged; its incomplete marker enables safe retry.
+
+When the source is smaller, block-sync warns and asks before truncating the target
+(default: no). Pass `-y` or `--yes` to accept shrinking in advance. `--force` does
+not bypass this confirmation. Declining leaves target, digest and marker unchanged;
+dry runs report the proposed change without prompting or reserving space. Old
+digests covering a different source size are rebuilt by destination comparison.
+Smaller block devices are rejected even with `--force`; larger devices retain the
+existing `--force` behavior of syncing only the source-sized prefix.
+
+The destination inode is locked for the entire sync, even when callers use
+different digest paths. Unexpected destination EOF is an error; zeros beyond
+EOF are synthesized only for a dry run's proposed extension. Before success,
+block-sync verifies the final regular-file size, so outside truncation cannot be
+mistaken for matching zero-filled data. Other applications must leave the target
+alone during the sync; inode locks are advisory.
+
 Block-sync persists `<digest>.incomplete` before target creation, resizing or
 updates. It removes the marker only after target and digest synchronization and
 directory synchronization succeed. After failure or interruption, the next block-sync automatically ignores the
@@ -154,6 +180,8 @@ all contribute to elapsed sync time. See [fixture validation and measurements](t
 |                              --dont-write | Perform dry run with no updates to target and digest file                                                   |
 |                       --dont-write-target | Perform run with no updates only to target device                                                           |
 |                       --dont-write-digest | Perform run with no updates only to digest file                                                             |
+|                           --preallocate | Reserve added target space before copying (opt-in)                                                         |
+|                               -y, --yes | Accept target shrinking without prompting                                                                  |
 |                                   --force | Allows to overwrite files and override parameters which was generated before                                |
 |                                  --silent | Doesn't print any messages                                                                                  |
 |                                -h, --help | Show this help message                                                                                      |

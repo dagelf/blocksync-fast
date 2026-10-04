@@ -153,7 +153,13 @@ void print_help(void)
 					   "  Perform run with no updates only to digest file\n"
 					   "\n"
 
-					   "--force\n"
+					   "--preallocate\n"
+                       "  Reserve added target space before growth (disabled by default)\n"
+                       "\n"
+                       "-y, --yes\n"
+                       "  Accept regular-file target shrinking without prompting\n"
+                       "\n"
+                       "--force\n"
 					   "  Allows to overwrite files and override parameters which was generated before\n"
 					   "\n"
 
@@ -278,7 +284,7 @@ void print_summary(void)
 
 void parse_options(int argc, char **argv)
 {
-	static const char *short_options = "hVs:d:S:f:D:b:a:l";
+	static const char *short_options = "hVys:d:S:f:D:b:a:l";
 	static struct option long_options[] = {
 		{"help", no_argument, 0, 'h'},
 		{"version", no_argument, 0, 'V'},
@@ -288,6 +294,8 @@ void parse_options(int argc, char **argv)
 		{"show-progress-detail", no_argument, &flag.progress, 2},
 		{"silent", no_argument, &flag.silent, 1},
 		{"force", no_argument, &flag.force, 1},
+        {"yes", no_argument, 0, 'y'},
+        {"preallocate", no_argument, 0, 1006},
 		{"mmap", no_argument, &flag.mmap, 1},
 		{"no-compare", no_argument, &flag.no_compare, 1},
 		{"sync-writes", no_argument, &flag.write_sync, 1},
@@ -328,6 +336,7 @@ void parse_options(int argc, char **argv)
 
 		switch (c)
 		{
+        case 'y': assume_yes = 1; break;
 		case 's':
 			src.path = optarg;
 			break;
@@ -366,6 +375,7 @@ void parse_options(int argc, char **argv)
         }
         case 1004: read_size = read_option_number(optarg, 1); read_options = 1; break;
         case 1005: direct_read = 1; read_options = 1; break;
+        case 1006: preallocate = 1; break;
 		case 'l':
 			print_algos();
 			exit(EXIT_SUCCESS);
@@ -816,6 +826,7 @@ void init_params(void)
             cleanup(EXIT_FAILURE);
         }
         if (BIT_SET(flag.dont_write, 1)) flag.dont_write = 3;
+        confirm_target_shrink();
         sync_guard_begin();
 		init_dst_device();
 

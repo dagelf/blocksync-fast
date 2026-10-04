@@ -128,11 +128,13 @@ void map_buffer(struct dev *dev)
 	{
         size_t done = 0;
         memset(dev->buf_data, 0, dev->buf_size);
-        while (done < dev->buf_size) {
-            ssize_t n = pread(dev->fd, dev->buf_data + done, dev->buf_size - done, dev->abs_off + done);
+        size_t present = dev->buf_size;
+        if (dev == &dst && BIT_SET(flag.dont_write, 1) && S_ISREG(dev->stat.st_mode))
+            present = dev->abs_off >= dev->stat.st_size ? 0 : MIN(present, (size_t)(dev->stat.st_size-dev->abs_off));
+        while (done < present) {
+            ssize_t n = pread(dev->fd, dev->buf_data + done, present - done, dev->abs_off + done);
             if (n < 0 && errno == EINTR) continue;
             if (n > 0) { done += n; continue; }
-            if (n == 0 && dev == &dst) break;
             if (n == 0) errno = EIO;
 			fprintf(stderr, "%s: error while reading from '%s' : %s\n", process_name, dev->path, strerror(errno));
 			cleanup(EXIT_FAILURE);
