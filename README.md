@@ -11,11 +11,16 @@ Blocksync-fast uses the Libgcrypt library and supports many hashing algorithms,
 
 ## Requirements
 
-- Linux with standard libraries and build tools
+- Linux with a C compiler, Make, Autoconf >= 2.71, Automake, pkg-config,
+  and Linux native AIO development headers (`linux/aio_abi.h`)
 - Required library: [Libgcrypt](https://github.com/gpg/libgcrypt) >= 1.9.0
 - Optional library: [xxHash](https://github.com/Cyan4973/xxHash) >= 0.8.0
 
 ## Installation
+
+Install the development headers for Libgcrypt and, if desired, xxHash.
+Generated Autotools files are not tracked in Git, so regenerate them before
+configuring a fresh checkout:
 
 ```console
  $ autoreconf --install
@@ -23,6 +28,20 @@ Blocksync-fast uses the Libgcrypt library and supports many hashing algorithms,
  $ make
  $ make install
 ```
+
+## Build artifacts and releases
+
+The GitHub Actions workflow builds a Linux binary and Debian package on pushes.
+Workflow artifacts are retained for five days; artifact-upload failures are
+nonfatal, so a successful build does not guarantee an artifact is available.
+Successful release uploads on pushes of tags beginning with `v` attach the binary
+and package to a GitHub release. Release assets are separate from the temporary
+workflow artifacts.
+
+The release name and tag use `git describe --tags --long --dirty`, rather than
+the pushed tag verbatim. For example, pushing `v1.0.8` can produce a release tag
+such as `v1.0.8-0-gabcdef0`. Creating releases requires the workflow's GitHub token
+to have permission to write repository contents.
 
 ## Usage
 
@@ -107,7 +126,9 @@ size and digest contents unchanged; its incomplete marker enables safe retry.
 
 When the source is smaller, block-sync warns and asks before truncating the target
 (default: no). Pass `-y` or `--yes` to accept shrinking in advance. `--force` does
-not bypass this confirmation. Declining leaves target, digest and marker unchanged;
+not bypass this confirmation. Noninteractive runs must pass `-y` to allow
+shrinking; stdin sources also require `-y` when shrinking would consume input
+intended as source data. Declining leaves target, digest and marker unchanged;
 dry runs report the proposed change without prompting or reserving space. Old
 digests covering a different source size are rebuilt by destination comparison.
 Smaller block devices are rejected even with `--force`; larger devices retain the
@@ -174,11 +195,11 @@ all contribute to elapsed sync time. See [fixture validation and measurements](t
 |                              --no-compare | Copy all data from src to dst without comparing differences                                                 |
 |                             --sync-writes | Immediately flushes and writes data to the disk specified at --buffer-size                                  |
 |                              --dont-write | Perform dry run with no updates to target and digest file                                                   |
-|                       --dont-write-target | Perform run with no updates only to target device                                                           |
+|                       --dont-write-target | Suppress target updates; block-sync also suppresses digest updates                                         |
 |                       --dont-write-digest | Perform run with no updates only to digest file                                                             |
 |                           --preallocate | Reserve added target space before copying (opt-in)                                                         |
 |                               -y, --yes | Accept target shrinking without prompting                                                                  |
-|                                   --force | Allows to overwrite files and override parameters which was generated before                                |
+|                                   --force | Override incompatible digest parameters or sync a larger device's source-sized prefix; does not approve shrinking or enlarge smaller devices |
 |                                  --silent | Doesn't print any messages                                                                                  |
 |                                -h, --help | Show this help message                                                                                      |
 |                             -V, --version | Show version                                                                                                |
