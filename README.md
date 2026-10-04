@@ -119,8 +119,8 @@ updates so it cannot claim that uncopied data reached the target. A run with
 `--dont-write-digest` retains the incomplete marker; the next block-sync
 compares destination bytes and rebuilds it. Dry runs with mmap use buffered comparisons.
 
-fio's 22.5 GB/s is a read-path benchmark, not a promised sync speed. Hashing,
-digest access, comparison, target writes, filesystem behavior and synchronization
+fio can be used to find the optimal settings and throughput can get close to theoretical maximum.
+Digest access, comparison, target writes, filesystem behavior and synchronization
 all contribute to elapsed sync time. See [fixture validation and measurements](tests/VALIDATION.md).
 
 ## Options
