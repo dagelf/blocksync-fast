@@ -51,6 +51,11 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
+# Disposable validation executables and fixtures
+/.test-build/
+/tests/__pycache__/
+
+
 # Generated build files
 /Makefile
 /src/Makefile

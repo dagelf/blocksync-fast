@@ -57,6 +57,72 @@ $ autoreconf --install
  $ blocksync-fast --make-delta -s /dev/vg1/vol1-snap -f /var/cache/backups/vol1.digest | ssh 192.168.1.115 'blocksync-fast --apply-delta -d /mnt/backups/vol1'
 ```
 
+## Queued source reads
+
+```console
+src/blocksync-fast -s ~/vms/400G-SQL.img -d /tmp/vms/400G-SQL.img -f /tmp/vms/400G-SQL.img.digest -b 4K --read-jobs=8 --read-depth=16 --read-size=256K --direct-read
+```
+
+A running VM image can be synchronized repeatedly: each digest entry represents
+bytes read and copied for that block, and changes after its read are picked up
+on a later pass. A live pass can combine blocks from different moments; it is not
+a point-in-time or guaranteed recoverable VM backup. Use a stopped VM or stable
+snapshot for a consistent copy and reproducible correctness/performance tests.
+Snapshots still benefit from faster transfers and shorter retention times.
+The options enable bounded Linux native AIO
+reads, using the same kernel interface as libaio. Each reader has its own Linux
+task ID, queue, hash context, aligned buffers and contiguous range. Eight readers
+with sixteen 256 KiB slots hold at most 32 MiB of source data in their queues,
+plus bounded comparison, digest and existing device buffers. Completed reads
+are hashed and compared in 4 KiB blocks; adjacent changed blocks within a read
+are written together. The digest indexing, hash algorithm and hash encoding are
+unchanged. Matching truncated hashes retain the existing collision risk.
+
+Without these options the existing synchronous reader remains the default.
+Specifying any read option enables the queued path; omitted values are one reader,
+depth sixteen and 256 KiB reads. `--buffer-size` retains its existing per-device
+buffer meaning. Limits are 64 readers, depth 256, read sizes from 4 KiB to 64 MiB
+in 4 KiB multiples, and 256 MiB total queued source buffers. Queued reads initially
+support block-sync with seekable files/devices and 4 KiB blocks. They reject mmap,
+stdin/stdout data streams, delta modes and detailed block progress. Basic progress
+prints a final summary when queued readers finish.
+
+`--direct-read` opens only the source with `O_DIRECT`. Alignment comes from
+`STATX_DIOALIGN`, the block device sector size when applicable, or a conservative
+4 KiB alignment on older regular-file systems. The final unaligned read uses the
+buffered source descriptor. Unsupported direct I/O produces an error and fails
+cleanly; omit `--direct-read` to use buffered reads. Direct writes are never enabled
+implicitly. Linux buffered AIO may perform reads synchronously during submission.
+
+Sparse handling is unchanged: ordinary reads return zeros for holes, which enter
+comparisons and digest generation and overwrite stale destination data. This
+change does not skip host extents or parse NTFS metadata.
+
+Block-sync persists `<digest>.incomplete` before target creation, resizing or
+updates. It removes the marker only after target and digest synchronization and
+directory synchronization succeed. After failure or interruption, the next block-sync automatically ignores the
+incomplete digest's header and entries, compares destination bytes, and rebuilds
+the digest using the current block-size/algorithm options. The marker stays in
+place until recovery succeeds. An exclusive lock on the marker prevents another
+sync using the same digest from starting while one is active. Dry-run recovery
+compares destination bytes while leaving target, digest and marker unchanged.
+Digest-only and delta modes refuse incomplete digests until block-sync recovers
+them. Keep the marker with the digest when moving files. Compatible old digests without a marker remain
+supported. A digest assumes its destination has not been changed externally;
+discard it when that assumption is false. Resizing/recreating a destination forces
+comparison instead of trusting its old digest. Source/destination inode and block
+device aliases are rejected before resizing.
+
+`--dont-write` does not create, truncate or update the target or digest, including
+when either is missing. For block-sync, `--dont-write-target` also suppresses digest
+updates so it cannot claim that uncopied data reached the target. A run with
+`--dont-write-digest` retains the incomplete marker; the next block-sync
+compares destination bytes and rebuilds it. Dry runs with mmap use buffered comparisons.
+
+fio's 22.5 GB/s is a read-path benchmark, not a promised sync speed. Hashing,
+digest access, comparison, target writes, filesystem behavior and synchronization
+all contribute to elapsed sync time. See [fixture validation and measurements](tests/VALIDATION.md).
+
 ## Options
 
 |                                  Argument | Description                                                                                                 |
@@ -75,6 +141,10 @@ $ autoreconf --install
 |                         --benchmark-algos | Benchmark all supported hash algorithms                                                                     |
 |                             --digest-info | Checks digest file, prints info and exit                                                                    |
 |                              --delta-info | Checks delta file, prints info and exit                                                                     |
+|                           --read-jobs=N | Queued source reader threads (opt-in)                                                                       |
+|                          --read-depth=N | Maximum outstanding reads per reader (default:16)                                                          |
+|                     --read-size=N[KMG] | Bytes per queued source read (default:256K); independent of 4K hash blocks                                  |
+|                         --direct-read | Direct source reads; fail cleanly if unsupported                                                           |
 |                      --buffer-size=N[KMG] | Size of the buffer in N bytes for processing data per device (default:2M)                                   |
 |               --progress, --show-progress | Show current progress while syncing                                                                         |
 | --progress-detail, --show-progress-detail | Show more detailed progress which generates a lot of writes on the console                                  |

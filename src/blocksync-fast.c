@@ -18,6 +18,7 @@
 
 #include "globals.h"
 #include "init.h"
+#include "queued.h"
 
 void print_version(void)
 {
@@ -111,7 +112,11 @@ void print_help(void)
 					   "  Checks delta file, prints info and exit\n"
 					   "\n"
 
-					   "--buffer-size=N[KMG]\n"
+					   "--read-jobs=N --read-depth=N --read-size=N[KMG] --direct-read\n"
+                       "  Bounded Linux AIO reads (opt-in; defaults: 1 job, depth 16, size 256K)\n"
+                       "  Direct reads require alignment; unsupported direct I/O fails cleanly\n"
+                       "\n"
+                       "--buffer-size=N[KMG]\n"
 					   "  Size of the buffer in N bytes for processing data per device\n"
 					   "  (default:2M)\n"
 					   "\n"
@@ -295,6 +300,10 @@ void parse_options(int argc, char **argv)
 		{"digest", required_argument, 0, 'f'},
 		{"delta", required_argument, 0, 'D'},
 		{"buffer-size", required_argument, 0, 1001},
+        {"read-jobs", required_argument, 0, 1002},
+        {"read-depth", required_argument, 0, 1003},
+        {"read-size", required_argument, 0, 1004},
+        {"direct-read", no_argument, 0, 1005},
 		{"block-size", required_argument, 0, 'b'},
 		{"algo", required_argument, 0, 'a'},
 		{"list-algos", no_argument, 0, 'l'},
@@ -345,6 +354,18 @@ void parse_options(int argc, char **argv)
 		case 1001:
 			param.max_buf_size = parse_units(optarg);
 			break;
+        case 1002: {
+            size_t n = read_option_number(optarg, 0);
+            if (n > 64) { fprintf(stderr, "read-jobs exceeds 64\n"); exit(EXIT_FAILURE); }
+            read_jobs = n; read_options = 1; break;
+        }
+        case 1003: {
+            size_t n = read_option_number(optarg, 0);
+            if (n > 256) { fprintf(stderr, "read-depth exceeds 256\n"); exit(EXIT_FAILURE); }
+            read_depth = n; read_options = 1; break;
+        }
+        case 1004: read_size = read_option_number(optarg, 1); read_options = 1; break;
+        case 1005: direct_read = 1; read_options = 1; break;
 		case 'l':
 			print_algos();
 			exit(EXIT_SUCCESS);
@@ -468,8 +489,8 @@ void blocksync(void)
 		oper.num_block++;
 	}
 
-	blocksync_dev_wri_flush(0);
-	digest_wri_flush(0);
+	blocksync_dev_wri_flush(dev_flush);
+	digest_wri_flush(digest_flush);
 }
 
 void make_delta(void)
@@ -573,7 +594,7 @@ void make_delta(void)
 		oper.num_block++;
 	}
 
-	digest_wri_flush(0);
+	digest_wri_flush(digest_flush);
 	makedelta_wri_flush_buf();
 
 	delta.data_size = delta.abs_off;
@@ -742,7 +763,7 @@ void make_digest(void)
 		oper.num_block++;
 	}
 
-	digest_wri_flush(0);
+	digest_wri_flush(digest_flush);
 }
 
 void init_params(void)
@@ -753,6 +774,10 @@ void init_params(void)
 	if (flag.silent)
 		freopen("/dev/null", "w", flag.prst) != NULL;
 
+    if (flag.oper_mode == BLOCKSYNC && flag.dont_write && flag.mmap) {
+        fprintf(flag.prst, "Dry run uses buffered comparison to avoid writable mappings or resizing\n");
+        flag.mmap = 0;
+    }
 	init_map_methods();
 
 	if (flag.oper_mode == BLOCKSYNC)
@@ -776,6 +801,22 @@ void init_params(void)
 
 		check_block_size();
 		init_src_device();
+        /* Reject all aliases before target sizing or digest header updates. */
+        struct stat target_stat, digest_stat;
+        if (!stat(dst.path, &target_stat) &&
+            ((src.stat.st_dev == target_stat.st_dev && src.stat.st_ino == target_stat.st_ino) ||
+             (S_ISBLK(src.stat.st_mode) && S_ISBLK(target_stat.st_mode) && src.stat.st_rdev == target_stat.st_rdev))) {
+            fprintf(stderr, "%s: source and destination refer to the same inode/device\n", process_name);
+            cleanup(EXIT_FAILURE);
+        }
+        if (digest.path && !stat(digest.path, &digest_stat) &&
+            ((src.stat.st_dev == digest_stat.st_dev && src.stat.st_ino == digest_stat.st_ino) ||
+             (!stat(dst.path, &target_stat) && target_stat.st_dev == digest_stat.st_dev && target_stat.st_ino == digest_stat.st_ino))) {
+            fprintf(stderr, "%s: digest aliases source or destination\n", process_name);
+            cleanup(EXIT_FAILURE);
+        }
+        if (BIT_SET(flag.dont_write, 1)) flag.dont_write = 3;
+        sync_guard_begin();
 		init_dst_device();
 
 		if (digest.path != NULL)
@@ -976,6 +1017,7 @@ int main(int argc, char **argv)
 
 	process_name = basename(argv[0]);
 	parse_options(argc, argv);
+    validate_read_options();
 
 	switch (flag.oper_mode)
 	{
@@ -996,7 +1038,16 @@ int main(int argc, char **argv)
 
 	case BLOCKSYNC:
 		init_params();
-		blocksync();
+        if (read_options) {
+            if (queued_sync()) cleanup(EXIT_FAILURE);
+        } else blocksync();
+        struct stat source_after;
+        if (fstat(src.fd, &source_after) || (S_ISREG(src.stat.st_mode) &&
+            (source_after.st_size != src.stat.st_size))) {
+            fprintf(stderr, "%s: source size changed during sync\n", process_name);
+            cleanup(EXIT_FAILURE);
+        }
+        sync_guard_finish();
 		print_summary();
 		break;
 

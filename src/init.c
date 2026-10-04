@@ -17,6 +17,7 @@
 */
 
 #include "globals.h"
+#include "queued.h"
 
 void init_map_methods(void)
 {
@@ -101,8 +102,12 @@ void init_src_device(void)
         }
 
         src.open_mode |= READ;
-        src.data_size = lseek(src.fd, 0, SEEK_END);
-        lseek(src.fd, 0, SEEK_SET);
+        off_t source_size = lseek(src.fd, 0, SEEK_END);
+        if (source_size < 0 || lseek(src.fd, 0, SEEK_SET) < 0) {
+            fprintf(stderr, "%s: source must be seekable: %s\n", process_name, strerror(errno));
+            cleanup(EXIT_FAILURE);
+        }
+        src.data_size = source_size;
 
         if (param.h_data_size != NULL && param.data_size != src.data_size) {
             if (param.data_size > src.data_size) {
@@ -120,7 +125,7 @@ void init_src_device(void)
                     src.path, format_units(src.data_size, true));
     }
 
-    if (src.data_size < 1)
+    if (src.data_size < 1 && flag.oper_mode != BLOCKSYNC)
     {
         fprintf(stderr, "%s: source device is empty\n", process_name);
         cleanup(EXIT_FAILURE);
@@ -135,7 +140,13 @@ void init_dst_device(void)
     if (access(dst.path, F_OK) == 0)
         dst.open_mode |= READ;
 
-    dst.fd = open(dst.path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+    dst.fd = open(dst.path, BIT_SET(flag.dont_write, 1) ? O_RDONLY : O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+    if (dst.fd < 0 && BIT_SET(flag.dont_write, 1) && errno == ENOENT) {
+        dst.data_size = src.data_size;
+        dst.open_mode &= ~READ;
+        dst.open_mode |= WRITE;
+        return;
+    }
 
     if (dst.fd < 0 || fstat(dst.fd, &dst.stat) < 0)
     {
@@ -146,8 +157,16 @@ void init_dst_device(void)
         cleanup(EXIT_FAILURE);
     }
 
+    if (flag.oper_mode == BLOCKSYNC &&
+        ((src.stat.st_dev == dst.stat.st_dev && src.stat.st_ino == dst.stat.st_ino) ||
+         (S_ISBLK(src.stat.st_mode) && S_ISBLK(dst.stat.st_mode) && src.stat.st_rdev == dst.stat.st_rdev))) {
+        fprintf(stderr, "%s: source and destination alias\n", process_name);
+        cleanup(EXIT_FAILURE);
+    }
+
     if (!IS_MODE(dst.open_mode, READ))
     {
+        destination_resized = 1;
         fprintf(flag.prst, "Creating target device: '%s'\n",
                 dst.path);
 
@@ -169,6 +188,7 @@ void init_dst_device(void)
 
         if (flag.oper_mode == BLOCKSYNC && dst.data_size != src.data_size)
         {
+            destination_resized = 1;
             fprintf(stderr, "%s: Block devices size mismatch.\n", process_name);
 
             if (flag.force == 0)
@@ -179,7 +199,7 @@ void init_dst_device(void)
 
             fprintf(flag.prst, "Target device: '%s' has overwrited size of %s\n",
                     dst.path, format_units(src.data_size, true));
-            // dst.open_mode ^= READ; // allow different size without overwrite
+            // dst.open_mode &= ~READ; // allow different size without overwrite
 
             dst.data_size = src.data_size;
             dev_truncate(&dst);
@@ -204,7 +224,7 @@ void init_dst_device(void)
     dst.open_mode |= WRITE;
 
     if (flag.no_compare == 1)
-        dst.open_mode ^= READ;
+        dst.open_mode &= ~READ;
 }
 
 void init_digest_file()
@@ -213,7 +233,13 @@ void init_digest_file()
         if (access(digest.path, F_OK) == 0)
             digest.open_mode |= READ;
 
-        digest.fd = open(digest.path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+        if (flag.oper_mode != BLOCKSYNC) sync_guard_check();
+        digest.fd = open(digest.path, BIT_SET(flag.dont_write, 0) ? O_RDONLY : O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+        if (digest.fd < 0 && BIT_SET(flag.dont_write, 0) && errno == ENOENT) {
+            digest.open_mode &= ~READ;
+            digest.fd = -1;
+            /* Virtual missing digest for dry runs: no file is created. */
+        } else
 
         if (digest.fd < 0 || fstat(digest.fd, &digest.stat) < 0)
         {
@@ -230,6 +256,10 @@ void init_digest_file()
         digest.open_mode = PIPE;
     }
 
+    /* After interruption, even a valid-looking digest may describe writes
+     * that never reached the destination. Ignore its header and entries. */
+    if (flag.oper_mode == BLOCKSYNC && digest_recovery)
+        digest.open_mode &= ~READ;
     digest.open_mode |= WRITE;
     param.hash_use = true;
 
@@ -255,7 +285,7 @@ void init_digest_file()
                 cleanup(EXIT_FAILURE);
             }
 
-            digest.open_mode ^= READ;
+            digest.open_mode &= ~READ;
             digest.data_size = HEADER_SIZE;
         }
     }
@@ -284,7 +314,7 @@ void init_digest_file()
                 cleanup(EXIT_FAILURE);
             }
             fprintf(flag.prst, "Warning: overwriting digest file\n");
-            digest.open_mode ^= READ;
+            digest.open_mode &= ~READ;
         }
     }
 
@@ -317,7 +347,7 @@ void init_digest_file()
                     cleanup(EXIT_FAILURE);
                 }
                 fprintf(flag.prst, "Warning: overwriting digest file\n");
-                digest.open_mode ^= READ;
+                digest.open_mode &= ~READ;
             }
         }
 
@@ -338,7 +368,7 @@ void init_digest_file()
                         cleanup(EXIT_FAILURE);
                     }
                     fprintf(flag.prst, "Warning: overwriting digest file\n");
-                    digest.open_mode ^= READ;
+                    digest.open_mode &= ~READ;
 
                     _algo = param.algo;
                     break;
@@ -361,13 +391,32 @@ void init_digest_file()
                     cleanup(EXIT_FAILURE);
                 }
                 fprintf(flag.prst, "Warning: overwriting digest file\n");
-                digest.open_mode ^= READ;
+                digest.open_mode &= ~READ;
             }
         }
 
         digest.rel_off = 0;
     }
 
+    if (IS_MODE(digest.open_mode, READ) &&
+        (digest_header.total_blocks != (digest_header.data_size / digest_header.block_size + (digest_header.data_size % digest_header.block_size != 0)) ||
+         digest_header.total_blocks > (SIZE_MAX - HEADER_SIZE) / param.algo.size ||
+         digest.data_size != HEADER_SIZE + digest_header.total_blocks * param.algo.size)) {
+        fprintf(stderr, "%s: malformed or truncated digest body\n", process_name);
+        if (!flag.force) cleanup(EXIT_FAILURE);
+        digest.open_mode &= ~READ;
+    }
+    if (IS_MODE(digest.open_mode, READ) && digest_header.data_size != src.data_size)
+        digest.open_mode &= ~READ;
+    /* A digest cannot stand in for destination bytes after target sizing or
+     * creation. Recompare destination and rebuild entries in that case. */
+    if (flag.oper_mode == BLOCKSYNC &&
+        (destination_resized || !IS_MODE(dst.open_mode, READ)))
+        digest.open_mode &= ~READ;
+    if (read_options && param.block_size != 4096) {
+        fprintf(stderr, "%s: queued reads require a 4K digest block size\n", process_name);
+        cleanup(EXIT_FAILURE);
+    }
     digest.data_size = HEADER_SIZE + (param.num_blocks * param.algo.size);
     dev_truncate(&digest);
 
@@ -380,7 +429,7 @@ void init_digest_file()
     digest_header.hash_type = param.algo.value;
     memset(digest_header.padding, '\0', sizeof(digest_header.padding));
 
-    if (IS_MODE(digest.open_mode, MMAP))
+    if (!BIT_SET(flag.dont_write, 0) && IS_MODE(digest.open_mode, MMAP))
     {
         if (digest.buf_data == NULL)
             map_buffer(&digest);
@@ -389,14 +438,14 @@ void init_digest_file()
         memcpy((void *)digest.ptr_w, (const void *)&digest_header, (size_t)sizeof(digest_header));
     }
 
-    if (IS_MODE(digest.open_mode, DIRECT))
-        if (pwrite(digest.fd, (const void *)&digest_header, (size_t)sizeof(digest_header), (off_t)0) < 0)
+    if (!BIT_SET(flag.dont_write, 0) && IS_MODE(digest.open_mode, DIRECT))
+        if (write_at_all(digest.fd, (const void *)&digest_header, (size_t)sizeof(digest_header), (off_t)0) < 0)
         {
             fprintf(stderr, "%s: error while writing to '%s' : %s\n", process_name, digest.path, strerror(errno));
             cleanup(EXIT_FAILURE);
         }
 
-    if (IS_MODE(digest.open_mode, PIPE) && !isatty(STDOUT_FILENO))
+    if (!BIT_SET(flag.dont_write, 0) && IS_MODE(digest.open_mode, PIPE) && !isatty(STDOUT_FILENO))
     {
         if (write(digest.fd, (const void *)&digest_header, (size_t)sizeof(digest_header)) < 0)
         {
@@ -409,7 +458,7 @@ void init_digest_file()
     sync_data(&digest);
 
     if (flag.no_compare == 1)
-        digest.open_mode ^= READ;
+        digest.open_mode &= ~READ;
 }
 
 void init_dst_delta(void)
@@ -480,7 +529,7 @@ void init_dst_delta(void)
 
     if (IS_MODE(delta.open_mode, DIRECT_W))
     {
-        if (pwrite(delta.fd, (const void *)&delta_header, (size_t)sizeof(delta_header), (off_t)0) < 0)
+        if (write_at_all(delta.fd, (const void *)&delta_header, (size_t)sizeof(delta_header), (off_t)0) < 0)
         {
             fprintf(stderr, "%s: error while writing to '%s' : %s\n", process_name, delta.path, strerror(errno));
             cleanup(EXIT_FAILURE);
