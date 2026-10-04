@@ -13,7 +13,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
           libxxhash-dev \
           xxhash
 
-    - name: Install optional libgcrypt dependencies  
+    - name: Install optional libgcrypt dependencies
       run: |
         sudo apt-get install -y --no-install-recommends \
           libgcrypt20-dev \
@@ -55,7 +55,7 @@ jobs:
     - name: Create release directory
       run: |
         mkdir -p release
- 
+
     - name: Generate build files
       run: |
         autoreconf --install
@@ -89,20 +89,20 @@ jobs:
         make
         cp src/blocksync-fast release/${{ steps.version.outputs.target_filename }}
         chmod +x release/${{ steps.version.outputs.target_filename }}
-    
+
     - name: Build deb package
       run: |
         # Install build dependencies
         mk-build-deps
         sudo apt install ./blocksync-fast-build-deps_*.deb
-        
+
         # Build with fakeroot to avoid permission issues
         sudo debuild -us -uc -b
-        
+
         # Copy the deb package to release directory
         cp ../blocksync-fast_*.deb release/ || true
-    
-    
+
+
     - name: Create release (on tag push)
       uses: softprops/action-gh-release@v1
       # Upload a release only if the push is a tag
@@ -112,7 +112,7 @@ jobs:
         name: Release ${{ steps.version.outputs.git_describe }}
         body: |
           ## blocksync-fast ${{ steps.version.outputs.git_describe }}
-          
+
           **Git Info:** ${{ steps.version.outputs.git_describe }}
           **Commit:** ${{ steps.version.outputs.commit_hash }}
         files: |
@@ -121,7 +121,7 @@ jobs:
         draft: false
         prerelease: false
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # Upload GitHub Action workflow *artifacts*. Note "artifacts" are a different concept to GitHub release assets. The former is available on each
     # workflow run. The latter is associated with only a pushed tag.
@@ -135,4 +135,4 @@ jobs:
           release/${{ steps.version.outputs.target_filename }}
           release/blocksync-fast_*.deb
         retention-days: 5
- 
+
